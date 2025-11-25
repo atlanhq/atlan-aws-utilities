@@ -1,0 +1,103 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::LanguageExtensions
+Description: SMUS Atlan Integration Stack
+
+Parameters:
+  SMUSDomainId:
+    Type: String
+    Description: "The unique identifier for the SMUS (SageMaker Unified Studio) domain"
+  SMUSProjectsToSync:
+    Type: CommaDelimitedList
+    Description: "The project IDs in SMUS where SMUS Atlan synchronization will be enabled."
+  AtlanNodeInstanceRoleArn:
+    Type: String
+    Description: "The ARN of the Atlan node instance role. This is used to create a trust relationship between SMUS and Atlan."
+
+Resources:
+  SMUSAtlanManagedAccessPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      Description: Managed policy for providing access between SMUS and Atlan
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - datazone:ListSubscriptions
+              - datazone:ListDomains
+              - datazone:GetGlossary
+              - datazone:UpdateProject
+              - datazone:SearchListings
+              - datazone:ListDataProductRevisions
+              - datazone:GetProject
+              - datazone:GetSubscriptionTarget
+              - datazone:GetLineageEvent
+              - datazone:CreateGlossaryTerm
+              - datazone:ListSubscriptionTargets
+              - datazone:UpdateDomainUnit
+              - datazone:GetGlossaryTerm
+              - datazone:GetSubscription
+              - datazone:ListSubscriptionGrants
+              - datazone:GetUserProfile
+              - datazone:ListDomainUnitsForParent
+              - datazone:CreateProjectMembership
+              - datazone:Search
+              - datazone:GetDomainUnit
+              - datazone:UpdateDomain
+              - datazone:ListProjects
+              - datazone:ListLineageEvents
+              - datazone:GetListing
+              - datazone:CreateGlossary
+              - datazone:CreateProject
+              - datazone:GetAsset
+              - datazone:GetAssetFilter
+              - datazone:GetSubscriptionRequestDetails
+              - datazone:GetDomain
+              - datazone:GetDataProduct
+              - datazone:GetFormType
+              - datazone:CreateAssetRevision
+              - datazone:UpdateGlossary
+              - datazone:UpdateSubscriptionRequest
+              - datazone:UpdateGlossaryTerm
+              - datazone:GetSubscriptionGrant
+              - datazone:SearchUserProfiles
+              - datazone:ListSubscriptionRequests
+            Resource: "*"
+            Condition:
+              StringEquals:
+                aws:ResourceAccount: !Ref AWS::AccountId
+
+  SMUSAtlanManagedAccessRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: SMUSAtlanManagedAccessRole
+      Description: Role for providing access between SMUS and Atlan
+      ManagedPolicyArns:
+        - !Ref SMUSAtlanManagedAccessPolicy
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Ref AtlanNodeInstanceRoleArn
+            Action: sts:AssumeRole
+
+  SMUSAtlanManagedAccessRoleUserProfile:
+    Type: AWS::DataZone::UserProfile
+    Properties:
+      DomainIdentifier: !Ref SMUSDomainId
+      Status: ACTIVATED
+      UserIdentifier: !GetAtt SMUSAtlanManagedAccessRole.Arn
+      UserType: IAM_ROLE
+
+  Fn::ForEach::CreateProjectMembership:
+    - ProjectId
+    - !Ref SMUSProjectsToSync
+    - 'SMUSProjectMembership${ProjectId}':
+        Type: AWS::DataZone::ProjectMembership
+        Properties:
+          ProjectIdentifier: !Sub '${ProjectId}'
+          Designation: PROJECT_OWNER
+          Member:
+            UserIdentifier: !GetAtt SMUSAtlanManagedAccessRoleUserProfile.Id
+          DomainIdentifier: !Ref SMUSDomainId
