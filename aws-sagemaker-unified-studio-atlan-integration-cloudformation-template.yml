@@ -1,0 +1,443 @@
+# =============================================================================
+# SMUS (SageMaker Unified Studio) - Atlan Integration CloudFormation Template
+# =============================================================================
+#
+# WHAT IS SMUS (SageMaker Unified Studio)?
+# -----------------------------------------
+# Official AWS Service Name: Amazon SageMaker Unified Studio
+# 
+# Amazon SageMaker Unified Studio is part of the next generation of Amazon 
+# SageMaker, announced at AWS re:Invent 2024. It is a unified data and AI 
+# development environment that brings together AWS analytics and AI/ML services
+# including:
+#   - Amazon EMR (big data processing)
+#   - AWS Glue (ETL and data integration)
+#   - Amazon Athena (SQL queries)
+#   - Amazon Redshift (data warehousing)
+#   - Amazon Bedrock (generative AI)
+#   - Amazon SageMaker AI (ML model development)
+#
+# SMUS uses Amazon SageMaker Catalog (built on Amazon DataZone) for governance,
+# which is why this template creates DataZone resources (UserProfile, 
+# ProjectMembership). The "datazone:" API actions in the IAM policy correspond
+# to the underlying DataZone service that powers SMUS governance features.
+#
+# TEMPLATE PURPOSE:
+# -----------------
+# This template establishes a secure cross-account connection between SMUS 
+# (running in your AWS account) and Atlan (a data catalog/governance platform
+# running in Atlan's infrastructure). It enables Atlan to:
+#   - Synchronize metadata from your SMUS projects
+#   - Read glossaries, assets, and data products
+#   - Manage subscriptions and lineage information
+#   - Create and update descriptions and glossary terms for unified data governance
+#
+# =============================================================================
+
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::LanguageExtensions
+
+Description: >
+  SMUS Atlan Integration Stack - Creates IAM roles and DataZone resources
+  to enable secure integration between Amazon SageMaker Unified Studio and
+  Atlan's data catalog platform. This stack establishes cross-account trust
+  and grants Atlan, PROJECT_OWNER access to specified SMUS projects.
+
+# =============================================================================
+# PARAMETERS
+# =============================================================================
+# These parameters allow customization of the stack without modifying the 
+# template. They should be provided during stack creation.
+
+Parameters:
+  SMUSDomainId:
+    Type: String
+    Description: >
+      The unique identifier for the SMUS (SageMaker Unified Studio) domain.
+      This is a DataZone domain ID (format: dzd-xxxxxxxxxx) that represents
+      your organization's SMUS environment. Find this in the SageMaker Unified
+      Studio console under Domain Settings.
+    # Example: dzd-abc123def456, dzd_abc123def456
+
+  SMUSProjectsToSync:
+    Type: CommaDelimitedList
+    Description: >
+      Comma-separated list of SMUS project IDs where Atlan synchronization 
+      will be enabled. Each project ID grants Atlan PROJECT_OWNER access to
+      that specific project's assets, glossaries, and metadata.
+      SECURITY NOTE: Only include projects that should be visible to Atlan.
+    # Example: prj-abc123,prj-def456,prj-ghi789
+
+  AtlanNodeInstanceRoleArn:
+    Type: String
+    Description: >
+      The ARN of the Atlan node instance role. This is the IAM role used by
+      Atlan's infrastructure to access your AWS resources. This role ARN 
+      should be provided by Atlan during the integration setup process.
+      SECURITY NOTE: Verify this ARN with Atlan to prevent unauthorized access.
+    # Example: arn:aws:iam::123456789012:role/AtlanNodeInstanceRole
+
+# =============================================================================
+# RESOURCES
+# =============================================================================
+
+Resources:
+
+  # ---------------------------------------------------------------------------
+  # RESOURCE: SMUSAtlanManagedAccessPolicy
+  # ---------------------------------------------------------------------------
+  # PURPOSE:
+  #   This IAM managed policy defines the specific DataZone API permissions
+  #   that Atlan needs to synchronize with your SMUS environment. It follows
+  #   the principle of least privilege by only granting read access and 
+  #   limited write access for glossary/description management.
+  #
+  # HOW IT WORKS WITH OTHER RESOURCES:
+  #   - Attached to: SMUSAtlanManagedAccessRole
+  #   - The role assumes this policy's permissions when Atlan connects
+  #
+  # STACK BEHAVIOR:
+  #   - Creation: Policy is created first (no dependencies)
+  #   - Deletion: Policy is deleted after the role that references it
+  #   - Update: Policy can be updated in-place; changes take effect immediately
+  # ---------------------------------------------------------------------------
+  
+  SMUSAtlanManagedAccessPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      Description: >
+        Managed policy for providing access between SMUS and Atlan.
+        Grants DataZone API permissions for metadata synchronization,
+        glossary management, and subscription handling.
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              # ---------------------------------------------------------------
+              # SECURITY IMPLICATIONS OF WILDCARD RESOURCE ("*"):
+              # ---------------------------------------------------------------
+              # These permissions use Resource: "*" which means they apply to
+              # ALL DataZone resources in the account. This is necessary because:
+              #
+              # 1. DataZone API Limitation: Many DataZone APIs don't support 
+              #    resource-level permissions (ARN-based restrictions)
+              #
+              # 2. Cross-Resource Operations: Actions like Search, ListDomains,
+              #    and ListProjects need account-wide visibility to function
+              #
+              # 3. Dynamic Resources: Asset IDs and glossary terms are created
+              #    dynamically, making static ARN restrictions impractical
+              #
+              # MITIGATION CONTROLS IN PLACE:
+              # - Condition restricts access to resources in THIS account only
+              # - No destructive actions (Delete*) are included
+              # - No administrative actions (like CreateDomain) are included
+              # - ProjectMembership limits actual data access to specific projects
+              #
+              # RISK ASSESSMENT:
+              # - LOW: Read-only actions (Get*, List*, Search*)
+              # - MEDIUM: Write actions (Create*, Update*) - limited to descriptions
+              #   and glossary terms management, not data access
+              # ---------------------------------------------------------------
+              
+              # --- READ-ONLY PERMISSIONS (Low Risk) ---
+              # Domain and Project Discovery
+              - datazone:GetDomain             # Get domain details
+              - datazone:GetDomainUnit         # Get domain unit details
+              - datazone:GetProject            # Get project details
+              - datazone:ListDomainUnitsForParent  # List domain organizational units
+              - datazone:ListDomains           # List all domains in account
+              - datazone:ListProjects          # List projects in a domain
+              
+              # Asset and Listing Discovery
+              - datazone:GetAsset              # Get asset metadata
+              - datazone:GetAssetFilter        # Get asset filter configuration
+              - datazone:GetListing            # Get published listing details
+              - datazone:Search                # General metadata search
+              - datazone:SearchListings        # Search published data listings
+              
+              # Glossary Read Access
+              - datazone:GetGlossary           # Get glossary details
+              - datazone:GetGlossaryTerm       # Get individual term details
+              
+              # Data Product Access
+              - datazone:GetDataProduct        # Get data product details
+              - datazone:ListDataProductRevisions  # List data product versions
+              
+              # Subscription Read Access
+              - datazone:GetSubscription       # Get subscription details
+              - datazone:GetSubscriptionGrant      # Get grant details
+              - datazone:GetSubscriptionRequestDetails  # Get request details
+              - datazone:GetSubscriptionTarget     # Get target details
+              - datazone:ListSubscriptionGrants    # List granted subscriptions
+              - datazone:ListSubscriptionRequests  # List pending requests
+              - datazone:ListSubscriptions     # List active subscriptions
+              - datazone:ListSubscriptionTargets   # List subscription targets
+              
+              # Lineage Access
+              - datazone:GetLineageEvent       # Get lineage event details
+              - datazone:ListLineageEvents     # List lineage events
+              
+              # User and Form Access
+              - datazone:GetFormType           # Get custom form definitions
+              - datazone:GetUserProfile        # Get user profile info
+              - datazone:SearchUserProfiles    # Search for users
+              
+              # --- WRITE PERMISSIONS (Medium Risk) ---
+              # These allow Atlan to create/update descriptions and glossary terms for 
+              # bidirectional metadata synchronization
+              
+              # Glossary Management
+              - datazone:CreateGlossary        # Create new glossaries
+              - datazone:CreateGlossaryTerm    # Create new terms
+              - datazone:UpdateGlossary        # Update glossary metadata
+              - datazone:UpdateGlossaryTerm    # Update term definitions
+              
+              # Project Management (for sync purposes)
+              - datazone:CreateProject         # Create projects (if needed)
+              - datazone:CreateProjectMembership  # Add members to projects
+              - datazone:UpdateProject         # Update project metadata
+              
+              # Asset Management
+              - datazone:CreateAssetRevision   # Create new asset versions
+              
+              # Domain Management
+              - datazone:UpdateDomain          # Update domain settings
+              - datazone:UpdateDomainUnit      # Update domain unit settings
+              
+              # Subscription Management
+              - datazone:UpdateSubscriptionRequest  # Approve/reject requests
+              
+            Resource: "*"
+            
+            # ---------------------------------------------------------------
+            # CONDITION: Account-Level Restriction
+            # ---------------------------------------------------------------
+            # This condition ensures that even with Resource: "*", the 
+            # permissions ONLY apply to DataZone resources owned by THIS
+            # AWS account. This prevents any cross-account data access to
+            # other customers' DataZone domains.
+            #
+            # SECURITY BENEFIT: If Atlan's role were compromised, attackers
+            # could only access DataZone resources in your account, not
+            # traverse to other AWS accounts.
+            # ---------------------------------------------------------------
+            Condition:
+              StringEquals:
+                aws:ResourceAccount: !Ref AWS::AccountId
+
+  # ---------------------------------------------------------------------------
+  # RESOURCE: SMUSAtlanManagedAccessRole
+  # ---------------------------------------------------------------------------
+  # PURPOSE:
+  #   This IAM role is the identity that Atlan assumes to access your SMUS
+  #   environment. It establishes cross-account trust with Atlan's infrastructure.
+  #
+  # HOW IT WORKS WITH OTHER RESOURCES:
+  #   - Uses: SMUSAtlanManagedAccessPolicy (attached as managed policy)
+  #   - Used by: SMUSAtlanManagedAccessRoleUserProfile (registered in SageMaker Unified Studio)
+  #   - Trusted by: AtlanNodeInstanceRoleArn (Atlan's infrastructure role)
+  #
+  # CROSS-ACCOUNT TRUST MECHANISM:
+  #   When Atlan needs to sync your SMUS data:
+  #   1. Atlan's infrastructure (AtlanNodeInstanceRole) calls sts:AssumeRole
+  #   2. AWS validates the trust policy allows this principal
+  #   3. Atlan receives temporary credentials for SMUSAtlanManagedAccessRole
+  #   4. Atlan uses these credentials to call DataZone APIs
+  #
+  # SECURITY CONSIDERATIONS:
+  #   - Only the specific Atlan role ARN can assume this role
+  #   - Temporary credentials have a maximum session duration (default 1 hour)
+  #   - All API calls are logged in CloudTrail under this role's identity
+  #
+  # STACK BEHAVIOR:
+  #   - Creation: Created after the managed policy
+  #   - Deletion: Role must be deleted before the policy
+  #   - Update: Role name changes require REPLACEMENT (new role created)
+  #     WARNING: Changing RoleName will break the Atlan integration until
+  #     Atlan is reconfigured with the new role ARN
+  # ---------------------------------------------------------------------------
+  
+  SMUSAtlanManagedAccessRole:
+    Type: AWS::IAM::Role
+    Properties:
+      # Fixed role name for predictable ARN construction providing additional trackability and auditability among custom generated role names by CloudFormation
+      # WARNING: This creates a dependency - Atlan configuration must use this
+      # exact role name. Do not change without coordinating with Atlan.
+      RoleName: SMUSAtlanManagedAccessRole
+      
+      Description: >
+        Role for providing cross-account access between SMUS and Atlan.
+        Assumed by Atlan's infrastructure to synchronize metadata.
+        
+      ManagedPolicyArns:
+        - !Ref SMUSAtlanManagedAccessPolicy
+        
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              # Trust only the specific Atlan role
+              # SECURITY: Verify this ARN with Atlan before deployment
+              AWS: !Ref AtlanNodeInstanceRoleArn
+            Action: sts:AssumeRole
+            # Optional: Add conditions for additional security
+            # Condition:
+            #   StringEquals:
+            #     sts:ExternalId: "your-external-id"  # Prevents confused deputy
+
+  # ---------------------------------------------------------------------------
+  # RESOURCE: SMUSAtlanManagedAccessRoleUserProfile
+  # ---------------------------------------------------------------------------
+  # PURPOSE:
+  #   Registers the IAM role as a user identity within the SMUS/DataZone domain.
+  #   This is required because DataZone uses its own identity system separate
+  #   from IAM. The UserProfile bridges IAM roles to DataZone permissions.
+  #
+  # HOW IT WORKS WITH OTHER RESOURCES:
+  #   - Uses: SMUSAtlanManagedAccessRole (registered as UserIdentifier)
+  #   - Uses: SMUSDomainId (domain where the profile is created)
+  #   - Used by: ProjectMembership resources (identified by profile ID)
+  #
+  # WHY THIS IS NECESSARY:
+  #   IAM permissions (via the policy) control what APIs can be called.
+  #   DataZone UserProfile + ProjectMembership control what DATA is accessible.
+  #   Both layers are required for the integration to work.
+  #
+  # COST IMPLICATIONS:
+  #   - UserProfile creation: FREE (CreateUserProfile is a free-tier API)
+  #   - UserProfile storage: Counted toward the 20 MB free metadata storage
+  #   - A single UserProfile uses minimal storage (~1 KB)
+  #
+  # STACK BEHAVIOR:
+  #   - Creation: Created after the IAM role
+  #   - Deletion: Automatically deactivated and removed
+  #   - Update: UserIdentifier changes require REPLACEMENT
+  # ---------------------------------------------------------------------------
+  
+  SMUSAtlanManagedAccessRoleUserProfile:
+    Type: AWS::DataZone::UserProfile
+    Properties:
+      DomainIdentifier: !Ref SMUSDomainId
+      
+      # ACTIVATED means the profile can be used immediately
+      # Alternative: DEACTIVATED (for staged rollouts)
+      Status: ACTIVATED
+      
+      # Link this profile to the IAM role's ARN
+      UserIdentifier: !GetAtt SMUSAtlanManagedAccessRole.Arn
+      
+      # IAM_ROLE indicates this is a service/machine identity, not a human user
+      # This affects how the identity appears in DataZone audit logs
+      UserType: IAM_ROLE
+
+  # ---------------------------------------------------------------------------
+  # RESOURCE: ProjectMembership (Dynamic - One per Project)
+  # ---------------------------------------------------------------------------
+  # PURPOSE:
+  #   Grants the Atlan service role PROJECT_OWNER access to each specified
+  #   SMUS project. This is the resource that actually controls what data
+  #   Atlan can see and modify within your SMUS environment.
+  #
+  # HOW IT WORKS:
+  #   The Fn::ForEach intrinsic function (from AWS::LanguageExtensions) 
+  #   iterates over the SMUSProjectsToSync list and creates one 
+  #   AWS::DataZone::ProjectMembership resource for each project ID.
+  #
+  #   For example, if SMUSProjectsToSync = ["prj-abc", "prj-def"], this creates:
+  #   - SMUSProjectMembershipprj-abc (logical ID)
+  #   - SMUSProjectMembershipprj-def (logical ID)
+  #
+  # COST IMPLICATIONS:
+  #   - ProjectMembership creation: FREE (CreateProjectMembership is free-tier)
+  #   - Each membership uses minimal metadata storage (~0.5 KB)
+  #   - API calls for membership management are counted toward 4,000 free/month
+  #
+  # STACK BEHAVIOR:
+  #   - Creation: Created after UserProfile
+  #   - Deletion: Memberships are removed (Atlan loses access immediately)
+  #   - Update: Adding/removing projects from the list triggers resource
+  #     creation/deletion accordingly
+  #
+  #   IMPORTANT: Removing a project from SMUSProjectsToSync during a stack
+  #   update will IMMEDIATELY revoke Atlan's access to that project.
+  # ---------------------------------------------------------------------------
+  
+  Fn::ForEach::CreateProjectMembership:
+    - ProjectId                           # Iterator variable name
+    - !Ref SMUSProjectsToSync             # List to iterate over
+    - 'SMUSProjectMembership${ProjectId}': # Logical ID pattern
+        Type: AWS::DataZone::ProjectMembership
+        Properties:
+          # The SMUS project where membership is granted
+          ProjectIdentifier: !Sub '${ProjectId}'
+          
+          Designation: PROJECT_OWNER
+          
+          # Link to the UserProfile (not the IAM role directly)
+          Member:
+            UserIdentifier: !GetAtt SMUSAtlanManagedAccessRoleUserProfile.Id
+            
+          # Must match the domain where the project exists
+          DomainIdentifier: !Ref SMUSDomainId
+
+# =============================================================================
+# COST SUMMARY
+# =============================================================================
+#
+# This stack uses Amazon DataZone (underlying SMUS governance) resources.
+# DataZone pricing follows a pay-as-you-go model with free tier:
+#
+# FREE TIER (per account, per month):
+#   - 20 MB metadata storage
+#   - 4,000 API requests
+#   - 0.2 compute units
+#
+# RESOURCES CREATED BY THIS STACK:
+#   - 1 IAM Managed Policy: FREE (IAM has no charges)
+#   - 1 IAM Role: FREE (IAM has no charges)
+#   - 1 UserProfile: ~1 KB metadata storage
+#   - N ProjectMemberships: ~0.5 KB each
+#
+# ESTIMATED MONTHLY COST: $0.00 (within free tier)
+#   - Metadata: < 1 KB per resource, well under 20 MB
+#   - API calls: Stack operations + Atlan sync calls
+#   - Note: Atlan's sync frequency affects API call volume
+#
+# COST EXCEEDING FREE TIER:
+#   - Metadata storage: $0.40 per GB/month
+#   - API requests: $10 per 100,000 requests
+#   - Compute: $1.776 per compute unit
+#
+# For current pricing, see: https://aws.amazon.com/datazone/pricing/
+#
+# =============================================================================
+# STACK LIFECYCLE
+# =============================================================================
+#
+# CREATION ORDER (automatic via CloudFormation dependencies):
+#   1. SMUSAtlanManagedAccessPolicy (no dependencies)
+#   2. SMUSAtlanManagedAccessRole (depends on policy)
+#   3. SMUSAtlanManagedAccessRoleUserProfile (depends on role)
+#   4. ProjectMembership resources (depend on UserProfile)
+#
+# DELETION ORDER (reverse of creation):
+#   1. ProjectMembership resources deleted first
+#   2. UserProfile deactivated and deleted
+#   3. IAM Role deleted
+#   4. IAM Managed Policy deleted
+#
+# DELETION BEHAVIOR:
+#   - All resources support clean deletion
+#   - Atlan loses access immediately when stack deletion begins
+#   - No orphaned resources or permissions remain
+#   - CloudTrail logs remain for audit purposes
+#
+# ROLLBACK BEHAVIOR:
+#   - If creation fails, all created resources are automatically deleted
+#   - If update fails, stack rolls back to previous state
+#   - Atlan access is preserved during rollback
+#
+# =============================================================================
