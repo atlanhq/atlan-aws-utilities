@@ -270,6 +270,8 @@ Resources:
       Description: >
         Role for providing cross-account access between SMUS and Atlan.
         Assumed by Atlan's infrastructure to synchronize metadata.
+      
+      MaxSessionDuration: 28800 # 8 hours
         
       ManagedPolicyArns:
         - !Ref SMUSAtlanManagedAccessPolicy
