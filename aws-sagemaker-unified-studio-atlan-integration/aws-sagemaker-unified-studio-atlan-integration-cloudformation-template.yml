@@ -149,6 +149,7 @@ Resources:
               - datazone:ListDomainUnitsForParent  # List domain organizational units
               - datazone:ListDomains           # List all domains in account
               - datazone:ListProjects          # List projects in a domain
+              - datazone:ListProjectMemberships    # List project members (SSO owner names)
               
               # Asset and Listing Discovery
               - datazone:GetAsset              # Get asset metadata
@@ -201,6 +202,8 @@ Resources:
               
               # Asset Management
               - datazone:CreateAssetRevision   # Create new asset versions
+              - datazone:CreateListingChangeSet  # Publish the new revision to the
+                                                 # asset's existing catalog listing
               
               # Domain Management
               - datazone:UpdateDomain          # Update domain settings
