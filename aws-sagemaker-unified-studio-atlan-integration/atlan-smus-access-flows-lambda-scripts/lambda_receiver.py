@@ -55,6 +55,11 @@ def lambda_handler(event, context):
 
     workflow_run_guid = body.get('payload', {}).get('workflow_run_guid', None)
 
+    # Approver-selected SMUS asset filter (row/column scope), when one was chosen.
+    # Absent = full access (unchanged behaviour).
+    approval_details = body.get('payload', {}).get('approval_details', {})
+    selected_filter = approval_details.get('selected_filter', None)
+
     if not all([asset_name, asset_qualified_name, asset_type, workflow_run_guid]):
         return {
             'statusCode': 400,
@@ -111,6 +116,7 @@ def lambda_handler(event, context):
             'domain_id': domain_id,
             'request_reason': subscription_reason,
             'correlation_id': workflow_run_guid,
+            'selected_filter': selected_filter,
         })
     )
     

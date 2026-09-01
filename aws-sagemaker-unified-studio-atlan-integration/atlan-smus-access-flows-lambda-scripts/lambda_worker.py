@@ -27,6 +27,7 @@ def process_subscription(payload):
     domain_id = payload['domain_id']
     request_reason = payload['request_reason']
     correlation_id = payload.get('correlation_id', '')
+    selected_filter = payload.get('selected_filter')
 
     result = {
         'status': None,
@@ -108,21 +109,33 @@ def process_subscription(payload):
             # confirm the resulting subscription is APPROVED.
             print(f"Creating subscription request for project={target_project_id}")
 
-            sub_response = datazone.create_subscription_request(
-                domainIdentifier=domain_id,
-                requestReason=request_reason,
-                subscribedPrincipals=[
+            subscription_request_kwargs = {
+                'domainIdentifier': domain_id,
+                'requestReason': request_reason,
+                'subscribedPrincipals': [
                     {
                         'project': {
                             'identifier': target_project_id
                         }
                     }
                 ],
-                subscribedListings=[
+                'subscribedListings': [
                     {
                         'identifier': listing_id
                     }
+                ],
+            }
+
+            # Apply the approver-selected SMUS asset filter (row/column scope) if one
+            # was chosen. When absent, the grant is full access, as before.
+            if selected_filter:
+                print(f"Applying asset filter {selected_filter} to asset {asset_id}")
+                subscription_request_kwargs['assetScopes'] = [
+                    {'assetId': asset_id, 'filterIds': [selected_filter]}
                 ]
+
+            sub_response = datazone.create_subscription_request(
+                **subscription_request_kwargs
             )
 
             subscription_request_id = sub_response['id']
