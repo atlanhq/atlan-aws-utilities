@@ -19,9 +19,13 @@ def lambda_handler(event, context):
             }
 
     # --- Auth check ---
+    # Atlan's webhook delivery pipeline sends the signing secret in the
+    # x-atlan-signing-secret header (API Gateway HTTP APIs lowercase header
+    # names). 'secret-key' is kept as a fallback for callers configured
+    # against the previous behavior.
     headers = event.get('headers', {})
-    provided_key = headers.get('secret-key', '')
-    
+    provided_key = headers.get('x-atlan-signing-secret', '') or headers.get('secret-key', '')
+
     if provided_key != WEBHOOK_SECRET:
         return {
             'statusCode': 403,
