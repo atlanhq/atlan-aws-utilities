@@ -1,9 +1,11 @@
+import hmac
 import json
 import os
 import boto3
 
 sqs = boto3.client('sqs')
-WEBHOOK_SECRET = os.environ['WEBHOOK_SECRET']
+# WEBHOOK_SECRET may hold several comma-separated keys, so one receiver can serve several Atlan workflows.
+WEBHOOK_SECRETS = [key.strip() for key in os.environ['WEBHOOK_SECRET'].split(',') if key.strip()]
 SQS_QUEUE_URL = os.environ['SQS_QUEUE_URL']
 
 def lambda_handler(event, context):
@@ -20,9 +22,9 @@ def lambda_handler(event, context):
 
     # --- Auth check ---
     headers = event.get('headers', {})
-    provided_key = headers.get('secret-key', '')
-    
-    if provided_key != WEBHOOK_SECRET:
+    provided_key = headers.get('secret-key', '').encode('utf-8')
+
+    if not any(hmac.compare_digest(provided_key, secret.encode('utf-8')) for secret in WEBHOOK_SECRETS):
         return {
             'statusCode': 403,
             'body': json.dumps({'error': 'Forbidden. Webhook Receiver Lambda cannot be executed'})
