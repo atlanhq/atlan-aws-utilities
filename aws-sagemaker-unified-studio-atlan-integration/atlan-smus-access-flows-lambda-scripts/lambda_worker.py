@@ -37,6 +37,7 @@ def process_subscription(payload):
             'asset_id': asset_id,
         },
     }
+    listing_id = None
 
     try:
         # -------- STEP 1: Search Listings to get listing_id --------
@@ -93,11 +94,33 @@ def process_subscription(payload):
                 )
             else:  # SUBSCRIPTION_REQUEST (PENDING)
                 result['details']['subscription_request_id'] = existing['id']
-                result['message'] = (
-                    "A subscription request for this asset is already pending for "
-                    "the requesting project. No new request was created; the "
-                    "existing request will be processed."
+                # A PENDING request only means access is asked for, not granted.
+                # Report success only once it has an APPROVED subscription.
+                approved_subscription_id = verify_subscription_approved(
+                    domain_id=domain_id,
+                    subscription_request_id=existing['id'],
                 )
+                if approved_subscription_id:
+                    result['details']['subscription_id'] = approved_subscription_id
+                    result['message'] = (
+                        "A subscription request for this asset already existed for "
+                        "the requesting project and has been approved. No new "
+                        "request was created."
+                    )
+                else:
+                    print(
+                        f"Existing subscription request {existing['id']} is still "
+                        f"PENDING with no APPROVED subscription; reporting FAILURE."
+                    )
+                    result['status'] = 'FAILURE'
+                    result['details']['awaiting_approval'] = True
+                    result['message'] = (
+                        f"Access was not granted: subscription request "
+                        f"{existing['id']} for this asset is still PENDING approval "
+                        f"in SageMaker Unified Studio for project "
+                        f"{target_project_id}. No new request was created. Approve "
+                        f"that request in SMUS, then re-run this access request."
+                    )
 
         else:
 
@@ -184,25 +207,51 @@ def process_subscription(payload):
         # field so the consumer can differentiate failure modes programmatically
         # (throttling vs validation vs access denied, etc).
         aws_error_code = None
+        operation = None
+        caller_arn = None
         if isinstance(e, ClientError):
             aws_error_code = e.response.get('Error', {}).get('Code')
+            operation = getattr(e, 'operation_name', None)
+            # Name the identity that was refused, so an AccessDenied says which
+            # role to look at. Never lets its own failure replace the original.
+            caller_arn = get_caller_arn()
+
+        context_ids = (
+            f"domain_id={domain_id}, owning_project_id={owning_project_id}, "
+            f"target_project_id={target_project_id}, listing_id={listing_id}"
+        )
+        aws_context = ''
+        if operation or aws_error_code:
+            aws_context = (
+                f" operation={operation}, aws_error_code={aws_error_code}, "
+                f"caller_arn={caller_arn},"
+            )
 
         print(
-            f"ERROR processing subscription for asset_id={asset_id}, "
-            f"target_project={target_project_id}: {error_type}: {error_msg}"
+            f"ERROR processing subscription for asset_id={asset_id},{aws_context} "
+            f"{context_ids}: {error_type}: {error_msg}"
         )
 
         result['status'] = 'FAILURE'
         result['message'] = (
             f"Failed to provision subscription for asset {asset_id} in project "
-            f"{target_project_id}. {error_type}: {error_msg}"
+            f"{target_project_id}.{aws_context} {context_ids}. "
+            f"{error_type}: {error_msg}"
         )
         result['details']['error'] = {
             'type': error_type,
             'message': error_msg,
+            'domain_id': domain_id,
+            'owning_project_id': owning_project_id,
+            'target_project_id': target_project_id,
+            'listing_id': listing_id,
         }
         if aws_error_code:
             result['details']['error']['aws_error_code'] = aws_error_code
+        if operation:
+            result['details']['error']['operation'] = operation
+        if caller_arn:
+            result['details']['error']['caller_arn'] = caller_arn
 
         # Notify Atlan of the failure before re-raising, so the workflow side
         # gets failure detail in real time rather than only learning about it
@@ -219,6 +268,19 @@ def process_subscription(payload):
         notify_atlan(CALLBACK_URL, result)
 
     return result
+
+
+def get_caller_arn():
+    """Return the ARN this Lambda calls AWS as, or None if it cannot be read.
+
+    Only used to enrich error reports, so any failure is swallowed: it must
+    never replace the error being reported.
+    """
+    try:
+        return boto3.client('sts').get_caller_identity().get('Arn')
+    except Exception as e:
+        print(f"WARNING: could not read caller identity: {type(e).__name__}: {e}")
+        return None
 
 
 def verify_subscription_approved(domain_id, subscription_request_id):
