@@ -1,6 +1,8 @@
 import json
 import os
+import re
 import urllib3
+from botocore.config import Config
 from botocore.exceptions import ClientError
 import boto3
 
@@ -37,6 +39,7 @@ def process_subscription(payload):
             'asset_id': asset_id,
         },
     }
+    listing_id = None
 
     try:
         # -------- STEP 1: Search Listings to get listing_id --------
@@ -93,11 +96,33 @@ def process_subscription(payload):
                 )
             else:  # SUBSCRIPTION_REQUEST (PENDING)
                 result['details']['subscription_request_id'] = existing['id']
-                result['message'] = (
-                    "A subscription request for this asset is already pending for "
-                    "the requesting project. No new request was created; the "
-                    "existing request will be processed."
+                # A PENDING request only means access is asked for, not granted.
+                # Report success only once it has an APPROVED subscription.
+                approved_subscription_id = verify_subscription_approved(
+                    domain_id=domain_id,
+                    subscription_request_id=existing['id'],
                 )
+                if approved_subscription_id:
+                    result['details']['subscription_id'] = approved_subscription_id
+                    result['message'] = (
+                        "A subscription request for this asset already existed for "
+                        "the requesting project and has been approved. No new "
+                        "request was created."
+                    )
+                else:
+                    print(
+                        f"Existing subscription request {existing['id']} is still "
+                        f"PENDING with no APPROVED subscription; reporting FAILURE."
+                    )
+                    result['status'] = 'FAILURE'
+                    result['details']['awaiting_approval'] = True
+                    result['message'] = (
+                        f"Access was not granted: subscription request "
+                        f"{existing['id']} for this asset is still PENDING approval "
+                        f"in SageMaker Unified Studio for project "
+                        f"{target_project_id}. No new request was created. Approve "
+                        f"that request in SMUS, then request access again in Atlan."
+                    )
 
         else:
 
@@ -179,46 +204,98 @@ def process_subscription(payload):
     except Exception as e:
         error_type = type(e).__name__
         error_msg = str(e)
+        # AWS error text can embed ARNs (account id, role name). They stay in
+        # this Lambda's log and are masked in the result Atlan stores.
+        atlan_error_msg = re.sub(r'arn:aws[\w-]*:\S+', '<arn>', error_msg)
 
         # For boto/AWS ClientError, surface the AWS error code as a first-class
         # field so the consumer can differentiate failure modes programmatically
         # (throttling vs validation vs access denied, etc).
         aws_error_code = None
+        operation = None
         if isinstance(e, ClientError):
             aws_error_code = e.response.get('Error', {}).get('Code')
+            operation = getattr(e, 'operation_name', None)
+
+        context_ids = (
+            f"domain_id={domain_id}, owning_project_id={owning_project_id}, "
+            f"target_project_id={target_project_id}, listing_id={listing_id}"
+        )
+        aws_context = ''
+        if operation or aws_error_code:
+            aws_context = f" operation={operation}, aws_error_code={aws_error_code},"
 
         print(
-            f"ERROR processing subscription for asset_id={asset_id}, "
-            f"target_project={target_project_id}: {error_type}: {error_msg}"
+            f"ERROR processing subscription for asset_id={asset_id},{aws_context} "
+            f"{context_ids}: {error_type}: {error_msg}"
         )
 
         result['status'] = 'FAILURE'
         result['message'] = (
             f"Failed to provision subscription for asset {asset_id} in project "
-            f"{target_project_id}. {error_type}: {error_msg}"
+            f"{target_project_id}.{aws_context} {context_ids}. "
+            f"{error_type}: {atlan_error_msg}"
         )
         result['details']['error'] = {
             'type': error_type,
-            'message': error_msg,
+            'message': atlan_error_msg,
+            'domain_id': domain_id,
+            'owning_project_id': owning_project_id,
+            'target_project_id': target_project_id,
+            'listing_id': listing_id,
         }
         if aws_error_code:
             result['details']['error']['aws_error_code'] = aws_error_code
+        if operation:
+            result['details']['error']['operation'] = operation
 
         # Notify Atlan of the failure before re-raising, so the workflow side
         # gets failure detail in real time rather than only learning about it
         # after SQS exhausts retries and the message lands in the DLQ.
         # notify_atlan swallows its own errors internally, so this will not
         # mask the original exception we are about to raise.
-        if CALLBACK_URL:
-            notify_atlan(CALLBACK_URL, result)
+        report_to_atlan(result)
+
+        if isinstance(e, ClientError):
+            # Name the refused identity in this Lambda's log only. Looked up after
+            # the report, so a slow STS call can't delay or prevent it.
+            print(f"Caller identity for this error: caller_arn={get_caller_arn()}")
 
         raise
 
     # -------- STEP 4: Notify Atlan of completion --------
-    if CALLBACK_URL:
-        notify_atlan(CALLBACK_URL, result)
+    report_to_atlan(result)
 
     return result
+
+
+def report_to_atlan(result):
+    """Send the result to Atlan, or say in the log why it was not sent."""
+    if not CALLBACK_URL:
+        print(
+            "WARNING: ATLAN_CALLBACK_URL is not set, so this result was not sent "
+            "to Atlan and Atlan cannot see the outcome."
+        )
+        return
+    notify_atlan(CALLBACK_URL, result)
+
+
+def get_caller_arn():
+    """Return the ARN this Lambda calls AWS as, or None if it cannot be read.
+
+    Only used to enrich error reports, so any failure is swallowed: it must
+    never replace the error being reported.
+    """
+    try:
+        # Short timeouts: this only enriches an error log and must not hold the Lambda.
+        sts = boto3.client(
+            'sts',
+            config=Config(connect_timeout=2, read_timeout=2, retries={'total_max_attempts': 2}),
+        )
+        return sts.get_caller_identity().get('Arn')
+    except Exception as e:
+        print(f"WARNING: could not read caller identity: {type(e).__name__}: {e}")
+        return None
 
 
 def verify_subscription_approved(domain_id, subscription_request_id):
