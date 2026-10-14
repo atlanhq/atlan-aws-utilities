@@ -86,8 +86,10 @@ def test_existing_pending_request_not_approved_is_not_reported_as_success(monkey
 
     result = lambda_worker.process_subscription(_payload())
 
-    assert result["status"] != "SUCCESS"
-    assert notified[-1]["status"] != "SUCCESS"
+    # Atlan's callback accepts only SUCCESS or FAILURE.
+    assert result["status"] == "FAILURE"
+    assert notified[-1]["status"] == "FAILURE"
+    assert notified[-1]["details"]["awaiting_approval"] is True
     assert PENDING_REQUEST_ID in notified[-1]["message"]
     dz.create_subscription_request.assert_not_called()
 
@@ -120,8 +122,10 @@ def test_existing_approved_subscription_is_reported_as_success(monkeypatch, noti
 
 
 def _access_denied(operation):
+    # IAM-style denials name the caller's ARN in the error text.
+    message = f"User: {CALLER_ARN} is not authorized to perform: datazone:{operation}"
     return ClientError(
-        {"Error": {"Code": "AccessDeniedException", "Message": "not authorized"}},
+        {"Error": {"Code": "AccessDeniedException", "Message": message}},
         operation,
     )
 
@@ -132,10 +136,16 @@ def test_access_denied_reports_operation_code_and_ids(monkeypatch, notified, sts
     dz.list_subscription_requests.return_value = {"items": []}
     dz.create_subscription_request.side_effect = _access_denied("CreateSubscriptionRequest")
     monkeypatch.setattr(lambda_worker, "datazone", dz)
+    reports_sent_at_sts_call = []
+    sts.get_caller_identity.side_effect = (
+        lambda: reports_sent_at_sts_call.append(len(notified)) or {"Arn": CALLER_ARN}
+    )
 
     with pytest.raises(ClientError):
         lambda_worker.process_subscription(_payload())
 
+    # The STS lookup runs only after the report to Atlan has gone out.
+    assert reports_sent_at_sts_call == [1]
     error = notified[-1]["details"]["error"]
     assert notified[-1]["status"] == "FAILURE"
     assert error["aws_error_code"] == "AccessDeniedException"
@@ -175,4 +185,3 @@ def test_caller_identity_failure_does_not_mask_the_original_error(monkeypatch, n
     error = notified[-1]["details"]["error"]
     assert error["operation"] == "SearchListings"
     assert error["aws_error_code"] == "AccessDeniedException"
-    assert error.get("caller_arn") is None

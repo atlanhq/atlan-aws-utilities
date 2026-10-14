@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import urllib3
 from botocore.config import Config
 from botocore.exceptions import ClientError
@@ -120,7 +121,7 @@ def process_subscription(payload):
                         f"{existing['id']} for this asset is still PENDING approval "
                         f"in SageMaker Unified Studio for project "
                         f"{target_project_id}. No new request was created. Approve "
-                        f"that request in SMUS, then re-run this access request."
+                        f"that request in SMUS, then request access again in Atlan."
                     )
 
         else:
@@ -203,19 +204,18 @@ def process_subscription(payload):
     except Exception as e:
         error_type = type(e).__name__
         error_msg = str(e)
+        # AWS error text can embed ARNs (account id, role name). They stay in
+        # this Lambda's log and are masked in the result Atlan stores.
+        atlan_error_msg = re.sub(r'arn:aws[\w-]*:\S+', '<arn>', error_msg)
 
         # For boto/AWS ClientError, surface the AWS error code as a first-class
         # field so the consumer can differentiate failure modes programmatically
         # (throttling vs validation vs access denied, etc).
         aws_error_code = None
         operation = None
-        caller_arn = None
         if isinstance(e, ClientError):
             aws_error_code = e.response.get('Error', {}).get('Code')
             operation = getattr(e, 'operation_name', None)
-            # Name the identity that was refused, so an AccessDenied says which
-            # role to look at. Never lets its own failure replace the original.
-            caller_arn = get_caller_arn()
 
         context_ids = (
             f"domain_id={domain_id}, owning_project_id={owning_project_id}, "
@@ -225,23 +225,20 @@ def process_subscription(payload):
         if operation or aws_error_code:
             aws_context = f" operation={operation}, aws_error_code={aws_error_code},"
 
-        # The caller ARN names an AWS account and role, so it goes to this
-        # Lambda's own log only, not into the result sent to Atlan.
-        arn_context = f" caller_arn={caller_arn}," if caller_arn else ''
         print(
-            f"ERROR processing subscription for asset_id={asset_id},{aws_context}"
-            f"{arn_context} {context_ids}: {error_type}: {error_msg}"
+            f"ERROR processing subscription for asset_id={asset_id},{aws_context} "
+            f"{context_ids}: {error_type}: {error_msg}"
         )
 
         result['status'] = 'FAILURE'
         result['message'] = (
             f"Failed to provision subscription for asset {asset_id} in project "
             f"{target_project_id}.{aws_context} {context_ids}. "
-            f"{error_type}: {error_msg}"
+            f"{error_type}: {atlan_error_msg}"
         )
         result['details']['error'] = {
             'type': error_type,
-            'message': error_msg,
+            'message': atlan_error_msg,
             'domain_id': domain_id,
             'owning_project_id': owning_project_id,
             'target_project_id': target_project_id,
@@ -258,6 +255,11 @@ def process_subscription(payload):
         # notify_atlan swallows its own errors internally, so this will not
         # mask the original exception we are about to raise.
         report_to_atlan(result)
+
+        if isinstance(e, ClientError):
+            # Name the refused identity in this Lambda's log only. Looked up after
+            # the report, so a slow STS call can't delay or prevent it.
+            print(f"Caller identity for this error: caller_arn={get_caller_arn()}")
 
         raise
 
