@@ -126,7 +126,7 @@ def _access_denied(operation):
     )
 
 
-def test_access_denied_reports_operation_code_caller_and_ids(monkeypatch, notified, sts):
+def test_access_denied_reports_operation_code_and_ids(monkeypatch, notified, sts, capsys):
     dz = _datazone()
     dz.list_subscriptions.side_effect = _list_subscriptions()
     dz.list_subscription_requests.return_value = {"items": []}
@@ -140,12 +140,27 @@ def test_access_denied_reports_operation_code_caller_and_ids(monkeypatch, notifi
     assert notified[-1]["status"] == "FAILURE"
     assert error["aws_error_code"] == "AccessDeniedException"
     assert error["operation"] == "CreateSubscriptionRequest"
-    assert error["caller_arn"] == CALLER_ARN
+    # The caller ARN is logged in the Lambda, never sent to Atlan.
+    assert CALLER_ARN in capsys.readouterr().out
+    assert CALLER_ARN not in str(notified[-1])
     assert error["domain_id"] == DOMAIN_ID
     assert error["target_project_id"] == TARGET_PROJECT_ID
     assert error["owning_project_id"] == OWNING_PROJECT_ID
     assert error["listing_id"] == LISTING_ID
     assert "CreateSubscriptionRequest" in notified[-1]["message"]
+
+
+def test_missing_callback_url_is_logged(monkeypatch, capsys):
+    monkeypatch.setattr(lambda_worker, "CALLBACK_URL", "")
+    dz = _datazone()
+    dz.list_subscriptions.side_effect = _list_subscriptions(
+        approved_for_listing=[{"id": "subscription-0001", "subscriptionRequestId": "request-0001"}]
+    )
+    monkeypatch.setattr(lambda_worker, "datazone", dz)
+
+    lambda_worker.process_subscription(_payload())
+
+    assert "ATLAN_CALLBACK_URL is not set" in capsys.readouterr().out
 
 
 def test_caller_identity_failure_does_not_mask_the_original_error(monkeypatch, notified, sts):

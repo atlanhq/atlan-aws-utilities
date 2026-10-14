@@ -1,6 +1,7 @@
 import json
 import os
 import urllib3
+from botocore.config import Config
 from botocore.exceptions import ClientError
 import boto3
 
@@ -222,14 +223,14 @@ def process_subscription(payload):
         )
         aws_context = ''
         if operation or aws_error_code:
-            aws_context = (
-                f" operation={operation}, aws_error_code={aws_error_code}, "
-                f"caller_arn={caller_arn},"
-            )
+            aws_context = f" operation={operation}, aws_error_code={aws_error_code},"
 
+        # The caller ARN names an AWS account and role, so it goes to this
+        # Lambda's own log only, not into the result sent to Atlan.
+        arn_context = f" caller_arn={caller_arn}," if caller_arn else ''
         print(
-            f"ERROR processing subscription for asset_id={asset_id},{aws_context} "
-            f"{context_ids}: {error_type}: {error_msg}"
+            f"ERROR processing subscription for asset_id={asset_id},{aws_context}"
+            f"{arn_context} {context_ids}: {error_type}: {error_msg}"
         )
 
         result['status'] = 'FAILURE'
@@ -250,24 +251,31 @@ def process_subscription(payload):
             result['details']['error']['aws_error_code'] = aws_error_code
         if operation:
             result['details']['error']['operation'] = operation
-        if caller_arn:
-            result['details']['error']['caller_arn'] = caller_arn
 
         # Notify Atlan of the failure before re-raising, so the workflow side
         # gets failure detail in real time rather than only learning about it
         # after SQS exhausts retries and the message lands in the DLQ.
         # notify_atlan swallows its own errors internally, so this will not
         # mask the original exception we are about to raise.
-        if CALLBACK_URL:
-            notify_atlan(CALLBACK_URL, result)
+        report_to_atlan(result)
 
         raise
 
     # -------- STEP 4: Notify Atlan of completion --------
-    if CALLBACK_URL:
-        notify_atlan(CALLBACK_URL, result)
+    report_to_atlan(result)
 
     return result
+
+
+def report_to_atlan(result):
+    """Send the result to Atlan, or say in the log why it was not sent."""
+    if not CALLBACK_URL:
+        print(
+            "WARNING: ATLAN_CALLBACK_URL is not set, so this result was not sent "
+            "to Atlan and Atlan cannot see the outcome."
+        )
+        return
+    notify_atlan(CALLBACK_URL, result)
 
 
 def get_caller_arn():
@@ -277,7 +285,12 @@ def get_caller_arn():
     never replace the error being reported.
     """
     try:
-        return boto3.client('sts').get_caller_identity().get('Arn')
+        # Short timeouts: this only enriches an error log and must not hold the Lambda.
+        sts = boto3.client(
+            'sts',
+            config=Config(connect_timeout=2, read_timeout=2, retries={'total_max_attempts': 2}),
+        )
+        return sts.get_caller_identity().get('Arn')
     except Exception as e:
         print(f"WARNING: could not read caller identity: {type(e).__name__}: {e}")
         return None
