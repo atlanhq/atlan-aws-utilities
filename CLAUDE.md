@@ -9,9 +9,6 @@
 
 `atlan-aws-utilities` contains AWS infrastructure utility scripts. Key surfaces: IAM role assumptions, S3 operations, credential handling.
 
-### Security Contact
-Security questions → `#bu-security-and-it` on Slack.
-
 ### General Invariants
 - **[MUST]** No AWS access keys or secrets committed — use IAM roles and instance profiles.
 - **[MUST]** All S3 operations use server-side encryption. No public buckets.

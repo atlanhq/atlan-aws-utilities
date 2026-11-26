@@ -10,7 +10,7 @@
 `atlan-aws-utilities` contains AWS infrastructure utility scripts.
 
 ### Security Contact
-`#bu-security-and-it` on Slack.
+the Security team.
 
 ---
 
